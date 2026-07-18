@@ -357,7 +357,6 @@ class ProtectionProfile(
         """
         try:
             cert.pdf_data.report_metadata = extract_pdf_metadata(cert.state.report.source_path)
-            cert.state.report.extract_ok = True
         except ValueError:
             cert.state.report.extract_ok = False
         return cert
@@ -369,7 +368,6 @@ class ProtectionProfile(
         """
         try:
             cert.pdf_data.pp_metadata = extract_pdf_metadata(cert.state.pp.source_path)
-            cert.state.pp.extract_ok = True
         except ValueError:
             cert.state.pp.extract_ok = False
 
