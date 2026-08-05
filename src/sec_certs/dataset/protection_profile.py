@@ -177,6 +177,7 @@ class ProtectionProfileDataset(Dataset[ProtectionProfile], ComplexSerializableTy
         get_active: bool = True,
         get_archived: bool = True,
         get_collaborative: bool = True,
+        carry_processing_results: bool = False,
     ) -> None:
         """
         Fetches list of protection profiles together with metadata from commoncriteriaportal.org
@@ -184,12 +185,17 @@ class ProtectionProfileDataset(Dataset[ProtectionProfile], ComplexSerializableTy
         if to_download:
             self._download_html_resources(get_active, get_archived, get_collaborative)
 
+        old_certs = self.certs
+
         logger.info("Adding HTML certificates to ProtectionProfile dataset.")
         self.certs = self._get_all_certs_from_html(get_active, get_archived, get_collaborative)
         logger.info(f"The resulting dataset has {len(self)} certificates.")
 
         if not keep_metadata:
             shutil.rmtree(self.web_dir)
+
+        if carry_processing_results:
+            self._carry_processing_results(old_certs)
 
         self._set_local_paths()
         self.state.meta_sources_parsed = True
@@ -359,26 +365,35 @@ class ProtectionProfileDataset(Dataset[ProtectionProfile], ComplexSerializableTy
         )
 
     @only_backed()
-    def extract_data(self):
+    def extract_data(self, fresh: bool = True):
         """
         Extracts pdf metadata and keywords from converted text documents.
         """
         logger.info("Extracting various data from certification artifacts.")
-        self._extract_pdf_metadata()
-        self._extract_pdf_keywords()
+        doc_types = ["report", "pp"]
+        dgsts: dict[str, set[str]] = {
+            doc_type: {x.dgst for x in self if getattr(x.state, doc_type).is_ok_to_extract(fresh)}
+            for doc_type in doc_types
+        }
+        for doc_type in doc_types:
+            for dgst in dgsts[doc_type]:
+                getattr(self[dgst].state, doc_type).extract_ok = True
+
+        self._extract_pdf_metadata(dgsts)
+        self._extract_pdf_keywords(dgsts)
 
     @staged(logger, "Extracting metadata from certification artifacts.")
-    def _extract_pdf_metadata(self):
-        self._extract_report_metadata()
-        self._extract_pp_metadata()
+    def _extract_pdf_metadata(self, dgsts: dict[str, set[str]]):
+        self._extract_report_metadata(dgsts["report"])
+        self._extract_pp_metadata(dgsts["pp"])
 
     @staged(logger, "Extracting keywords from certification artifacts.")
-    def _extract_pdf_keywords(self):
-        self._extract_report_keywords()
-        self._extract_pp_keywords()
+    def _extract_pdf_keywords(self, dgsts: dict[str, set[str]]):
+        self._extract_report_keywords(dgsts["report"])
+        self._extract_pp_keywords(dgsts["pp"])
 
-    def _extract_report_metadata(self):
-        certs_to_process = [x for x in self if x.state.report.is_ok_to_analyze()]
+    def _extract_report_metadata(self, dgsts: set[str]):
+        certs_to_process = [self[dgst] for dgst in dgsts]
         processed_certs = cert_processing.process_parallel(
             ProtectionProfile.extract_report_pdf_metadata,
             certs_to_process,
@@ -387,8 +402,8 @@ class ProtectionProfileDataset(Dataset[ProtectionProfile], ComplexSerializableTy
         )
         self.update_with_certs(processed_certs)
 
-    def _extract_pp_metadata(self):
-        certs_to_process = [x for x in self if x.state.pp.is_ok_to_analyze()]
+    def _extract_pp_metadata(self, dgsts: set[str]):
+        certs_to_process = [self[dgst] for dgst in dgsts]
         processed_certs = cert_processing.process_parallel(
             ProtectionProfile.extract_pp_pdf_metadata,
             certs_to_process,
@@ -397,8 +412,8 @@ class ProtectionProfileDataset(Dataset[ProtectionProfile], ComplexSerializableTy
         )
         self.update_with_certs(processed_certs)
 
-    def _extract_report_keywords(self):
-        certs_to_process = [x for x in self if x.state.report.is_ok_to_analyze()]
+    def _extract_report_keywords(self, dgsts: set[str]):
+        certs_to_process = [self[dgst] for dgst in dgsts]
         processed_certs = cert_processing.process_parallel(
             ProtectionProfile.extract_report_pdf_keywords,
             certs_to_process,
@@ -407,8 +422,8 @@ class ProtectionProfileDataset(Dataset[ProtectionProfile], ComplexSerializableTy
         )
         self.update_with_certs(processed_certs)
 
-    def _extract_pp_keywords(self):
-        certs_to_process = [x for x in self if x.state.pp.is_ok_to_analyze()]
+    def _extract_pp_keywords(self, dgsts: set[str]):
+        certs_to_process = [self[dgst] for dgst in dgsts]
         processed_certs = cert_processing.process_parallel(
             ProtectionProfile.extract_pp_pdf_keywords,
             certs_to_process,

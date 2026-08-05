@@ -22,9 +22,7 @@ from sec_certs.dataset.cc_eucc_common import (
     compute_heuristics_body,
     convert_all_pdfs_body,
     download_all_artifacts_body,
-    extract_all_frontpages,
-    extract_all_keywords,
-    extract_all_metadata,
+    extract_all_data,
 )
 from sec_certs.dataset.dataset import Dataset, logger
 from sec_certs.sample.eucc import EUCCCertificate
@@ -96,19 +94,19 @@ class EUCCDataset(Dataset[EUCCCertificate], ComplexSerializableType):
         "Responsible NCCA": "responsible_ncca",
         "Scheme": "scheme",
         "Reference to the certification report associated with the certificate referred to in Annex V": "report_reference",
-        "Assurance level": "assurance_level",
+        "Assurance Level": "assurance_level",
         "CC Version": "cc_version",
         "CEM Version": "cem_version",
         "AVA_VAN Level": "ava_van_level",
         "Package": "package",
         "Protection Profile": "protection_profile",
-        "Year of issuance": "issuance_year",
+        "Year of Issuance": "issuance_year",
         "Month of Issuance": "issuance_month",
-        "date of issuance": "issuance_date_full",
+        "Date of Issuance": "issuance_date_full",
         "Certificate issue date": "issuance_date_full",
-        "ID of the Certificate (yearly number of certificate issued by the CB)": "certificate_yearly_number",
+        "ID of the Certificate": "certificate_yearly_number",
         "Modification/ Reassurance plus the ID": "modification_or_reassurance",
-        "period of validity of the certificate": "validity_period_years",
+        "Period of validity of the certificate": "validity_period_years",
     }
 
     def __init__(
@@ -274,13 +272,9 @@ class EUCCDataset(Dataset[EUCCCertificate], ComplexSerializableType):
         Locates the product description by finding the specific ewcms-page-section
         and extracting text from the second 'ecl' div.
         """
-        section = cert_soup.find("div", class_="ewcms-page-section")
-
-        if section:
-            ecl_elements = section.find_all("div", class_="ecl")
-            if len(ecl_elements) >= 2:
-                return ecl_elements[1].get_text(" ", strip=True)
-
+        paragraphs = cert_soup.select(".ewcms-page-section .ecl-container p")
+        if paragraphs:
+            return " ".join(p.get_text(" ", strip=True) for p in paragraphs)
         return ""
 
     def _parse_page_metadata(self, cert_soup: BeautifulSoup) -> dict[str, str]:
@@ -295,13 +289,15 @@ class EUCCDataset(Dataset[EUCCCertificate], ComplexSerializableType):
         metadata: dict[str, str] = {}
 
         for row in table.select("tr"):
-            cells = row.find_all("td")
-            if len(cells) != 2:
+            header = row.find("th")
+            cell = row.find("td")
+
+            if not header or not cell:
                 continue
 
-            raw_key = cells[0].get_text(strip=True)
-            raw_value = cells[1].get_text(separator=" ", strip=True)
-            clean_key = raw_key.strip().rstrip(";")
+            raw_key = header.get_text(strip=True)
+            raw_value = cell.get_text(separator=" ", strip=True)
+            clean_key = raw_key.strip().rstrip(":")
             mapped_key = self._metadata_key_map.get(clean_key)
 
             if not mapped_key:
@@ -323,15 +319,15 @@ class EUCCDataset(Dataset[EUCCCertificate], ComplexSerializableType):
         document_type_map = {
             "Certificate": "certificate",
             "Security Target": "security_target",
-            "Certification Report": "certification_report",
+            "Certificate Report": "certificate_report",
         }
 
         for label, key in document_type_map.items():
-            label_paragraph = cert_soup.find("p", string=label)
-            if not label_paragraph:
+            label_div = cert_soup.find("div", string=lambda t: t and label in t)
+            if not label_div:
                 continue
 
-            file_container = label_paragraph.find_next("div", class_="ecl-file")
+            file_container = label_div.find_next("div", class_="ecl-file")
             if not file_container:
                 continue
 
@@ -385,17 +381,26 @@ class EUCCDataset(Dataset[EUCCCertificate], ComplexSerializableType):
     @serialize
     @staged(logger, "Downloading and processing metadata from ENISA EUCC page.")
     @only_backed()
-    def get_certs_from_web(self, to_download: bool = True) -> None:
+    def get_certs_from_web(self, to_download: bool = True, carry_processing_results: bool = False) -> None:
         """
         Downloads certificate metadata from the ENISA website, parses the downloaded files, and constructs EUCC objects to
         populate the dataset.
 
         :param bool to_download: If fresh data shall be downloaded (or existing files utilized), defaults to True
+        :param bool carry_processing_results: If the dataset already holds certificates, carry their
+            already computed processing results over onto the freshly scraped certificates. So only certificates that are new,
+            changed or if files for them are missing can get reprocessed,
+            not the whole dataset. Defaults to False.
         """
+
+        old_certs = self.certs
         if to_download is True:
             self._download_metadata()
 
         logger.info(f"The resulting dataset has {len(self)} certificates.")
+
+        if carry_processing_results:
+            self._carry_processing_results(old_certs)
 
         self.root_dir.mkdir(parents=True, exist_ok=True)
         self._set_local_paths()
@@ -434,11 +439,9 @@ class EUCCDataset(Dataset[EUCCCertificate], ComplexSerializableType):
         convert_all_pdfs_body(self, converter_cls, fresh)
 
     @only_backed()
-    def extract_data(self) -> None:
+    def extract_data(self, fresh: bool = True) -> None:
         logger.info("Extracting various data from certification artifacts.")
-        extract_all_metadata(self)
-        extract_all_frontpages(self)
-        extract_all_keywords(self)
+        extract_all_data(self, fresh)
 
     def _compute_heuristics_body(self, skip_schemes: bool = False) -> None:
         compute_heuristics_body(self, skip_schemes)
